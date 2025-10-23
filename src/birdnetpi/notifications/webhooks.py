@@ -6,6 +6,8 @@ detection events occur, providing integration with external systems.
 
 import asyncio
 import logging
+import platform
+import socket
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -13,6 +15,7 @@ from urllib.parse import urlparse
 import httpx
 
 from birdnetpi.detections.models import Detection
+from birdnetpi.system.status import SystemInspector
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +70,15 @@ class WebhookConfig:
 class WebhookService:
     """Service for sending webhook notifications."""
 
-    def __init__(self, enable_webhooks: bool = False) -> None:
+    def __init__(self, enable_webhooks: bool = False, config: Any = None) -> None:
         """Initialize webhook service.
 
         Args:
             enable_webhooks: Whether webhook sending is enabled globally
+            config: BirdNET configuration object for accessing site_name and other settings
         """
         self.enable_webhooks = enable_webhooks
+        self.config = config
         self.webhooks: list[WebhookConfig] = []
         self.client: httpx.AsyncClient | None = None
         self.stats = {
@@ -163,11 +168,15 @@ class WebhookService:
         if not self._can_send():
             return
 
+        # Get device identification information
+        device_info = self._get_device_info()
+
         payload = {
             "event_type": "detection",
             "timestamp": datetime.now(UTC).isoformat(),
+            "device": device_info,
             "detection": {
-                "id": detection.id,
+                "id": str(detection.id),
                 "timestamp": detection.timestamp.isoformat(),
                 "species": detection.get_display_name(),
                 "confidence": detection.confidence,
@@ -362,6 +371,51 @@ class WebhookService:
 
         logger.error("Webhook failed after %d attempts: %s", webhook.retry_count + 1, webhook.name)
         return False
+
+    def _get_device_info(self) -> dict[str, Any]:
+        """Get device identification information for webhook payloads.
+        
+        Returns:
+            Dictionary containing device identification data
+        """
+        try:
+            # Get hostname
+            hostname = socket.gethostname()
+        except Exception:
+            hostname = "unknown"
+            
+        try:
+            # Get device name from system inspector
+            device_name = SystemInspector.get_device_name()
+        except Exception:
+            device_name = hostname
+            
+        try:
+            # Get platform information
+            platform_info = platform.platform()
+        except Exception:
+            platform_info = "unknown"
+            
+        # Base device info
+        device_info = {
+            "hostname": hostname,
+            "device_name": device_name,
+            "platform": platform_info,
+            "architecture": platform.machine(),
+            "python_version": platform.python_version(),
+        }
+        
+        # Add configuration data if available
+        if self.config:
+            try:
+                device_info["site_name"] = getattr(self.config, "site_name", "BirdNET-Pi")
+                device_info["latitude"] = getattr(self.config, "latitude", None)
+                device_info["longitude"] = getattr(self.config, "longitude", None)
+                device_info["birdweather_id"] = getattr(self.config, "birdweather_id", "")
+            except Exception:
+                pass  # Ignore config access errors
+                
+        return device_info
 
     def _can_send(self) -> bool:
         """Check if webhooks can be sent."""

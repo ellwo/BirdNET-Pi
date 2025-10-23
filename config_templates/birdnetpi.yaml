@@ -5,15 +5,15 @@
 config_version: "2.0.0"
 
 # Basic Settings
-site_name: BirdNET-Pi
-latitude: 63.4591
-longitude: -19.3647
+site_name: BirdNET-Pi-Saudi-Arabia
+latitude: 24.7136
+longitude: 46.6753
 model: BirdNET_GLOBAL_6K_V2.4_Model_FP16
 metadata_model: BirdNET_GLOBAL_6K_V2.4_MData_Model_FP16
 species_confidence_threshold: 0.70  # Minimum confidence threshold for species detection
 sensitivity_setting: 1.25
 analysis_overlap: 0.50  # Overlap between audio segments (0.0 to 3.0)
-audio_device_index: 4  # Device 4 (DMIC) - Digital Microphone Array
+audio_device_index: 2  # Device 4 (DMIC) - Digital Microphone Array
 sample_rate: 48000
 audio_channels: 1
 
@@ -49,6 +49,7 @@ webhook_targets:
   # Examples:
   # home_assistant: "http://192.168.1.100:8123/api/webhook/birdnet"
   # ifttt: "https://maker.ifttt.com/trigger/bird_detected/with/key/YOUR_KEY"
+  n8n: "https://n8n.nabaai.com/webhook/c7b55fc1-812d-4122-be6e-ebc0d73752cd"
 
 # Default message templates (Jinja2 supported)
 # Available variables: {{ common_name }}, {{ scientific_name }}, {{ confidence }},
@@ -57,7 +58,23 @@ notification_title_default: "BirdNET-Pi: {{ common_name }}"
 notification_body_default: "Detected {{ common_name }} ({{ scientific_name }}) at {{ confidence }}% confidence"
 
 # Notification Rules - Define when and how to send notifications
-notification_rules: []
+notification_rules:
+  - name: "Immediate Webhook All New Detections"
+    enabled: true
+    service: "webhook"
+    target: "n8n"
+    frequency:
+      when: "immediate"
+    scope: "new_ever"
+    include_taxa: {}
+    exclude_taxa: {}
+    minimum_confidence: 0
+    title_template: "🦅 BirdNET-Pi: {{ common_name }} Detected!"
+    body_template: "Species: {{ common_name }} ({{ scientific_name }})
+Confidence: {{ confidence_pct }}
+Time: {{ date }} at {{ time }}
+Location: {{ latitude }}, {{ longitude }}
+Timestamp: {{ timestamp }}"
   # Example rules (uncomment and modify as needed):
 
   # - name: "Rare Bird Alerts"
@@ -143,8 +160,8 @@ mqtt_topic_prefix: birdnet
 mqtt_client_id: birdnet-pi
 
 # Webhook Integration Settings
-enable_webhooks: false
-webhook_urls: []  # List of webhook URLs, e.g., ["http://example.com/webhook", "http://another.com/hook"]
+enable_webhooks: true
+webhook_urls: ["https://n8n.nabaai.com/webhook/c7b55fc1-812d-4122-be6e-ebc0d73752cd"]  # List of webhook URLs, e.g., ["http://example.com/webhook", "http://another.com/hook"]
 webhook_events: detection,health,gps,system
 
 # System Update Configuration
