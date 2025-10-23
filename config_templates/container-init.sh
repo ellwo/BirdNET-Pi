@@ -32,4 +32,21 @@ chmod 664 /var/lib/birdnetpi/config/birdnetpi.yaml
 echo "Permissions set:"
 ls -la /var/lib/birdnetpi/config/
 
+# Auto-configure audio devices
+echo "Auto-configuring audio devices..."
+if [ -f /opt/birdnetpi/config_templates/auto-configure-audio.py ]; then
+    # Copy the script to a location where birdnetpi user can access it
+    cp /opt/birdnetpi/config_templates/auto-configure-audio.py /var/lib/birdnetpi/auto-configure-audio.py
+    chown birdnetpi:birdnetpi /var/lib/birdnetpi/auto-configure-audio.py
+    chmod +x /var/lib/birdnetpi/auto-configure-audio.py
+    
+    # Run auto-configuration as birdnetpi user
+    su birdnetpi -c "cd /var/lib/birdnetpi && python3 auto-configure-audio.py"
+    
+    # Clean up
+    rm -f /var/lib/birdnetpi/auto-configure-audio.py
+else
+    echo "Auto-configuration script not found, using template defaults"
+fi
+
 echo "=== Init Complete ==="

@@ -34,6 +34,8 @@ services:
       - ${BIRDNET_DATA_VOLUME:-birdnet-data}:/var/lib/birdnetpi # Shared data volume
     networks:
       - birdnetpi-network
+    devices:
+      - /dev/snd:/dev/snd  # Direct access to audio devices
 
   birdnet-pi:
     build:
@@ -65,6 +67,8 @@ services:
       start_period: 60s
     logging:
       driver: json-file
+    devices:
+      - /dev/snd:/dev/snd  # Direct access to audio devices
     volumes:
       - ${BIRDNET_DATA_VOLUME:-birdnet-data}:/var/lib/birdnetpi # Persistent data storage
       - ~/.config/pulse/cookie:/home/birdnetpi/.config/pulse/cookie:ro # PulseAudio auth cookie only (read-only)
@@ -106,6 +110,8 @@ services:
       start_period: 60s
     logging:
       driver: json-file
+    devices:
+      - /dev/snd:/dev/snd  # Direct access to audio devices
     volumes:
       - ${BIRDNET_DATA_VOLUME:-birdnet-data}:/var/lib/birdnetpi # Persistent data storage
       - ~/.config/pulse/cookie:/home/birdnetpi/.config/pulse/cookie:ro # PulseAudio auth cookie only (read-only)
