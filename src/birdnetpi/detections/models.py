@@ -96,6 +96,34 @@ class Detection(DetectionBase, table=True):
         """Get the best available species display name."""
         return str(self.common_name or self.scientific_name)
 
+    def get_audio_file_data(self) -> dict[str, Any] | None:
+        """Safely get audio file data without triggering lazy loading.
+        
+        Returns:
+            Dictionary with audio file data or None if not available
+        """
+        try:
+            # Check if we have an audio_file_id
+            if not hasattr(self, 'audio_file_id') or self.audio_file_id is None:
+                return None
+                
+            # Try to access the audio_file relationship safely
+            audio_file = self.audio_file
+            if not audio_file:
+                return None
+                
+            return {
+                "id": str(audio_file.id),
+                "file_path": str(audio_file.file_path),
+                "duration_seconds": audio_file.duration,
+                "size_bytes": audio_file.size_bytes,
+            }
+            
+        except Exception:
+            # If we can't access the relationship (session not bound), return None
+            # This is expected when the Detection object is passed between services
+            return None
+
     # Indexes for JOIN performance optimization
     __table_args__ = (
         # Composite index for common query patterns
@@ -163,6 +191,32 @@ class DetectionWithTaxa(DetectionBase):
     def time(self) -> str:
         """Get the time portion of timestamp."""
         return self.timestamp.strftime("%H:%M") if self.timestamp else ""
+
+    def get_audio_file_data(self) -> dict[str, Any] | None:
+        """Safely get audio file data for DetectionWithTaxa.
+        
+        DetectionWithTaxa doesn't have direct audio_file relationship,
+        but may have audio_file_id for reference.
+        
+        Returns:
+            Dictionary with audio file data or None if not available
+        """
+        try:
+            # Check if we have an audio_file_id
+            if not hasattr(self, 'audio_file_id') or self.audio_file_id is None:
+                return None
+                
+            # DetectionWithTaxa doesn't have audio_file relationship loaded
+            # Return basic info if we have the ID
+            return {
+                "id": str(self.audio_file_id),
+                "file_path": None,  # Will need to be loaded separately
+                "duration_seconds": None,
+                "size_bytes": None,
+            }
+            
+        except Exception:
+            return None
 
     @model_serializer(mode="wrap")
     def serialize_model(self, serializer: object, info: object) -> dict[str, Any]:

@@ -143,7 +143,8 @@ class BirdNETConfig(BaseModel):
     # Webhook Integration settings
     enable_webhooks: bool = False  # Enable webhook notifications
     webhook_urls: list[str] = Field(default_factory=list)  # List of webhook URLs
-    webhook_events: str = "detection,health,gps,system"  # Events to send via webhooks
+    webhook_events: str = "detection,health,gps,system,audio_file,detection_with_taxa"  # Events to send via webhooks
+    webhook_include_audio_data: bool = True  # Include base64 encoded audio data in webhooks
 
     # Update Configuration
     updates: UpdateConfig = Field(default_factory=UpdateConfig)

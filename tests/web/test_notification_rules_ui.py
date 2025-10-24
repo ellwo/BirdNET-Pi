@@ -158,7 +158,7 @@ def test_post_settings_view_with_notification_rules(
         "mqtt_client_id": "birdnet-pi",
         "enable_webhooks": "false",
         "webhook_urls": "",
-        "webhook_events": "detection,health,gps,system",
+        "webhook_events": "detection,health,gps,system,audio_file,detection_with_taxa",
     }
 
     response = client.post("/admin/settings", data=form_data, follow_redirects=False)

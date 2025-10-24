@@ -8,12 +8,12 @@ from fastapi import WebSocket
 from birdnetpi.config import BirdNETConfig
 from birdnetpi.database.core import CoreDatabaseService
 from birdnetpi.database.species import SpeciesDatabaseService
-from birdnetpi.detections.models import Detection
+from birdnetpi.detections.models import Detection, DetectionWithTaxa
 from birdnetpi.detections.queries import DetectionQueryService
 from birdnetpi.notifications.apprise import AppriseService
 from birdnetpi.notifications.mqtt import MQTTService
 from birdnetpi.notifications.rules import NotificationRuleProcessor
-from birdnetpi.notifications.signals import detection_signal
+from birdnetpi.notifications.signals import detection_signal, detection_with_taxa_signal
 from birdnetpi.notifications.webhooks import WebhookService
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,7 @@ class NotificationManager:
     def register_listeners(self) -> None:
         """Register Blinker signal listeners."""
         detection_signal.connect(self._handle_detection_event)
+        detection_with_taxa_signal.connect(self._handle_detection_with_taxa_event)
         logger.info("NotificationManager listeners registered.")
 
     def add_websocket(self, websocket: WebSocket) -> None:
@@ -99,6 +100,21 @@ class NotificationManager:
             # No event loop running, skip IoT notifications
             logger.debug("No event loop running, skipping IoT notifications")
 
+    def _handle_detection_with_taxa_event(self, sender: object, detection: DetectionWithTaxa) -> None:
+        """Handle a new DetectionWithTaxa event by sending webhook notifications."""
+        logger.info(f"NotificationManager received DetectionWithTaxa: {detection.get_display_name()}")
+
+        # Send DetectionWithTaxa webhook notification
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self.send_detection_with_taxa_webhook(detection))
+            # Store task reference to avoid potential garbage collection issues
+            self._taxa_tasks: set = getattr(self, "_taxa_tasks", set())
+            self._taxa_tasks.add(task)
+            task.add_done_callback(self._taxa_tasks.discard)
+        except RuntimeError:
+            logger.debug("No event loop running, skipping DetectionWithTaxa webhook notifications")
+
     async def _send_websocket_notifications(self, detection: Detection) -> None:
         """Send detection notifications to all connected WebSocket clients."""
         if not self.active_websockets:
@@ -138,20 +154,69 @@ class NotificationManager:
     async def _send_iot_notifications(self, detection: Detection) -> None:
         """Send MQTT and webhook notifications for a detection event."""
         try:
+            # Reload detection with relationships to avoid session binding issues
+            detection_with_audio = await self._reload_detection_with_audio(detection.id)
+            
             # Send MQTT notification
             if self.mqtt_service:
-                await self.mqtt_service.publish_detection(detection)
+                await self.mqtt_service.publish_detection(detection_with_audio or detection)
                 logger.debug(f"MQTT detection published: {detection.get_display_name()}")
 
             # Send webhook notification
             if self.webhook_service:
-                await self.webhook_service.send_detection_webhook(detection)
+                await self.webhook_service.send_detection_webhook(detection_with_audio or detection)
                 logger.debug(f"Webhook detection sent: {detection.get_display_name()}")
 
         except Exception as e:
             logger.error(
                 f"Error sending IoT notifications for detection {detection.get_display_name()}: {e}"
             )
+
+    async def _reload_detection_with_audio(self, detection_id: str) -> Detection | None:
+        """Reload detection with audio_file relationship loaded.
+        
+        Args:
+            detection_id: UUID of the detection to reload
+            
+        Returns:
+            Detection object with loaded relationships or None if not found
+        """
+        try:
+            async with self.core_database.get_async_db() as session:
+                from sqlalchemy import select
+                from sqlalchemy.orm import selectinload
+                from birdnetpi.detections.models import Detection, DetectionWithTaxa
+                
+                result = await session.execute(
+                    select(Detection)
+                    .options(selectinload(Detection.audio_file))
+                    .where(Detection.id == detection_id)
+                )
+                detection = result.scalar_one_or_none()
+                
+                if detection:
+                    logger.debug(f"Reloaded detection {detection_id} with audio_file relationship")
+                    return detection
+                else:
+                    logger.warning(f"Detection {detection_id} not found for reload")
+                    return None
+                    
+        except Exception as e:
+            logger.warning(f"Failed to reload detection {detection_id}: {e}")
+            return None
+
+    async def send_detection_with_taxa_webhook(self, detection: DetectionWithTaxa) -> None:
+        """Send DetectionWithTaxa webhook notification.
+
+        Args:
+            detection: DetectionWithTaxa object to send
+        """
+        try:
+            if self.webhook_service:
+                await self.webhook_service.send_detection_with_taxa_webhook(detection)
+                logger.debug(f"DetectionWithTaxa webhook sent: {detection.get_display_name()}")
+        except Exception as e:
+            logger.error(f"Error sending DetectionWithTaxa webhook for {detection.get_display_name()}: {e}")
 
     async def _process_notification_rules(self, detection: Detection) -> None:
         """Process notification rules and send Apprise/webhook notifications.

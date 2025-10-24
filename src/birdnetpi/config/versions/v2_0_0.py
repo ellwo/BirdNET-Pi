@@ -80,7 +80,7 @@ class ConfigVersion_2_0_0:  # noqa: N801
             # Webhook Integration settings
             "enable_webhooks": False,
             "webhook_urls": [],
-            "webhook_events": "detection,health,gps,system",
+            "webhook_events": "detection,health,gps,system,audio_file,detection_with_taxa",
             # Update settings
             "updates": {
                 "check_enabled": True,

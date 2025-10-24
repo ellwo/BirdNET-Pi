@@ -179,6 +179,9 @@ class Container(containers.DeclarativeContainer):
     webhook_service = providers.Singleton(
         WebhookService,
         enable_webhooks=providers.Factory(lambda c: c.enable_webhooks, c=config),
+        config=config,
+        database_service=core_database,
+        species_db_service=species_database,
     )
 
     apprise_service = providers.Singleton(

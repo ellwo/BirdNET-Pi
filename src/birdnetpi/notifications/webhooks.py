@@ -5,16 +5,18 @@ detection events occur, providing integration with external systems.
 """
 
 import asyncio
+import base64
 import logging
 import platform
 import socket
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
-from birdnetpi.detections.models import Detection
+from birdnetpi.detections.models import Detection, DetectionWithTaxa
 from birdnetpi.system.status import SystemInspector
 
 logger = logging.getLogger(__name__)
@@ -50,7 +52,7 @@ class WebhookConfig:
         self.enabled = enabled
         self.timeout = timeout
         self.retry_count = retry_count
-        self.events = events or ["detection", "health", "gps", "system"]
+        self.events = events or ["detection", "health", "gps", "system", "audio_file", "detection_with_taxa"]
 
         # Validate URL
         parsed = urlparse(url)
@@ -70,15 +72,19 @@ class WebhookConfig:
 class WebhookService:
     """Service for sending webhook notifications."""
 
-    def __init__(self, enable_webhooks: bool = False, config: Any = None) -> None:
+    def __init__(self, enable_webhooks: bool = False, config: Any = None, database_service: Any = None, species_db_service: Any = None) -> None:
         """Initialize webhook service.
 
         Args:
             enable_webhooks: Whether webhook sending is enabled globally
             config: BirdNET configuration object for accessing site_name and other settings
+            database_service: Database service for querying DetectionWithTaxa data
+            species_db_service: Species database service for taxonomy lookups
         """
         self.enable_webhooks = enable_webhooks
         self.config = config
+        self.database_service = database_service
+        self.species_db_service = species_db_service
         self.webhooks: list[WebhookConfig] = []
         self.client: httpx.AsyncClient | None = None
         self.stats = {
@@ -165,37 +171,307 @@ class WebhookService:
         Args:
             detection: Detection object to send
         """
+        logger.info("===============================")
+        logger.info("WEBHOOK: Starting detection webhook process")
+        logger.info("===============================")
+        
         if not self._can_send():
+            logger.warning("===============================")
+            logger.warning("WEBHOOK: Cannot send - service disabled or no client")
+            logger.warning("===============================")
             return
 
+        logger.info("===============================")
+        logger.info("WEBHOOK: Step 1 - Sending detection payload")
+        logger.info("===============================")
+        
         # Get device identification information
         device_info = self._get_device_info()
+        logger.info("WEBHOOK: Device info collected: %s", device_info.get('site_name', 'unknown'))
+
+        # Prepare detection data
+        detection_data = {
+            "id": str(detection.id),
+            "timestamp": detection.timestamp.isoformat(),
+            "species": detection.get_display_name(),
+            "confidence": detection.confidence,
+            "location": {
+                "latitude": detection.latitude,
+                "longitude": detection.longitude,
+            }
+            if detection.latitude is not None and detection.longitude is not None
+            else None,
+            "analysis": {
+                "species_confidence_threshold": detection.species_confidence_threshold,
+                "week": detection.week,
+                "sensitivity_setting": detection.sensitivity_setting,
+                "overlap": detection.overlap,
+            },
+        }
+
+        # Add audio file metadata (without base64 data)
+        audio_file_data = detection.get_audio_file_data()
+        if audio_file_data:
+            detection_data["audio_file"] = audio_file_data
+            logger.info("WEBHOOK: Audio file metadata included")
+
+        # Add DetectionWithTaxa data if available
+        detection_with_taxa_data = await self._get_detection_with_taxa_data(str(detection.id))
+        if detection_with_taxa_data:
+            detection_data["detection_with_taxa"] = detection_with_taxa_data
+            logger.info("WEBHOOK: DetectionWithTaxa data included")
 
         payload = {
             "event_type": "detection",
             "timestamp": datetime.now(UTC).isoformat(),
             "device": device_info,
-            "detection": {
-                "id": str(detection.id),
-                "timestamp": detection.timestamp.isoformat(),
-                "species": detection.get_display_name(),
-                "confidence": detection.confidence,
-                "location": {
-                    "latitude": detection.latitude,
-                    "longitude": detection.longitude,
-                }
-                if detection.latitude is not None and detection.longitude is not None
-                else None,
-                "analysis": {
-                    "species_confidence_threshold": detection.species_confidence_threshold,
-                    "week": detection.week,
-                    "sensitivity_setting": detection.sensitivity_setting,
-                    "overlap": detection.overlap,
-                },
+            "detection": detection_data,
+        }
+
+        logger.info("WEBHOOK: Payload prepared, size: %d bytes", len(str(payload)))
+        await self._send_to_webhooks("detection", payload)
+        
+        logger.info("===============================")
+        logger.info("WEBHOOK: Step 2 - Sending audio file separately")
+        logger.info("===============================")
+        
+        # Send audio file separately if available
+        await self._send_audio_file_webhook(detection)
+
+    async def send_detection_with_taxa_webhook(self, detection: DetectionWithTaxa) -> None:
+        """Send detection with taxonomy information to configured webhooks.
+
+        Args:
+            detection: DetectionWithTaxa object to send
+        """
+        logger.info("===============================")
+        logger.info("WEBHOOK: Starting detection with taxa webhook process")
+        logger.info("===============================")
+        
+        if not self._can_send():
+            logger.warning("===============================")
+            logger.warning("WEBHOOK: Cannot send - service disabled or no client")
+            logger.warning("===============================")
+            return
+
+        logger.info("===============================")
+        logger.info("WEBHOOK: Step 1 - Sending detection with taxa payload")
+        logger.info("===============================")
+        
+        # Get device identification information
+        device_info = self._get_device_info()
+        logger.info("WEBHOOK: Device info collected: %s", device_info.get('site_name', 'unknown'))
+
+        # Prepare detection data with taxonomy information
+        detection_data = {
+            "id": str(detection.id),
+            "timestamp": detection.timestamp.isoformat(),
+            "species": detection.get_display_name(),
+            "confidence": detection.confidence,
+            "location": {
+                "latitude": detection.latitude,
+                "longitude": detection.longitude,
+            }
+            if detection.latitude is not None and detection.longitude is not None
+            else None,
+            "analysis": {
+                "species_confidence_threshold": detection.species_confidence_threshold,
+                "week": detection.week,
+                "sensitivity_setting": detection.sensitivity_setting,
+                "overlap": detection.overlap,
+            },
+            "taxonomy": {
+                "scientific_name": detection.scientific_name,
+                "common_name": detection.common_name,
+                "ioc_english_name": detection.ioc_english_name,
+                "translated_name": detection.translated_name,
+                "family": detection.family,
+                "genus": detection.genus,
+                "order_name": detection.order_name,
+            },
+            "first_detection_info": {
+                "is_first_ever": detection.is_first_ever,
+                "is_first_in_period": detection.is_first_in_period,
+                "first_ever_detection": detection.first_ever_detection.isoformat() if detection.first_ever_detection else None,
+                "first_period_detection": detection.first_period_detection.isoformat() if detection.first_period_detection else None,
             },
         }
 
-        await self._send_to_webhooks("detection", payload)
+        # Add audio file metadata (without base64 data)
+        audio_file_data = detection.get_audio_file_data()
+        if audio_file_data:
+            detection_data["audio_file"] = audio_file_data
+            logger.info("WEBHOOK: Audio file metadata included")
+
+        payload = {
+            "event_type": "detection_with_taxa",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "device": device_info,
+            "detection": detection_data,
+        }
+
+        logger.info("WEBHOOK: Payload prepared, size: %d bytes", len(str(payload)))
+        await self._send_to_webhooks("detection_with_taxa", payload)
+        
+        logger.info("===============================")
+        logger.info("WEBHOOK: Step 2 - Sending audio file separately")
+        logger.info("===============================")
+        
+        # Send audio file separately if available
+        await self._send_audio_file_webhook_for_taxa(detection)
+
+    async def _send_audio_file_webhook(self, detection: Detection) -> None:
+        """Send audio file separately to configured webhooks.
+
+        Args:
+            detection: Detection object containing audio file information
+        """
+        # Get audio file data safely
+        audio_file_data = detection.get_audio_file_data()
+        if not audio_file_data:
+            logger.info("===============================")
+            logger.info("WEBHOOK: No audio file to send")
+            logger.info("===============================")
+            return
+
+        if not self.config or not getattr(self.config, 'webhook_include_audio_data', False):
+            logger.info("===============================")
+            logger.info("WEBHOOK: Audio file sending disabled in config")
+            logger.info("===============================")
+            return
+
+        logger.info("===============================")
+        logger.info("WEBHOOK: Preparing audio file for webhook")
+        logger.info("===============================")
+
+        try:
+            audio_path = Path("/var/lib/birdnetpi/recordings/"+audio_file_data["file_path"])
+            if not audio_path.exists():
+                logger.warning("===============================")
+                logger.warning("WEBHOOK: Audio file does not exist: %s", audio_path)
+                logger.warning("===============================")
+                return
+
+            logger.info("WEBHOOK: Reading audio file: %s", audio_path)
+            with open(audio_path, 'rb') as f:
+                audio_data = f.read()
+            
+            logger.info("WEBHOOK: Audio file size: %d bytes", len(audio_data))
+            
+            # Encode audio data to base64
+            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+            logger.info("WEBHOOK: Audio file encoded to base64, size: %d characters", len(audio_base64))
+
+            # Get device identification information
+            device_info = self._get_device_info()
+
+            # Prepare audio file payload
+            audio_payload = {
+                "event_type": "audio_file",
+                "timestamp": datetime.now(UTC).isoformat(),
+                "device": device_info,
+                "detection_id": str(detection.id),
+                "audio_file": {
+                    **audio_file_data,
+                    "audio_data_base64": audio_base64,
+                },
+            }
+
+            logger.info("===============================")
+            logger.info("WEBHOOK: Sending audio file payload")
+            logger.info("WEBHOOK: Total payload size: %d bytes", len(str(audio_payload)))
+            logger.info("===============================")
+
+            await self._send_to_webhooks("audio_file", audio_payload)
+            
+            logger.info("===============================")
+            logger.info("WEBHOOK: Audio file webhook completed successfully")
+            logger.info("===============================")
+
+        except Exception as e:
+            logger.error("===============================")
+            logger.error("WEBHOOK: Failed to send audio file: %s", e)
+            logger.error("===============================")
+
+    async def _send_audio_file_webhook_for_taxa(self, detection: DetectionWithTaxa) -> None:
+        """Send audio file separately for DetectionWithTaxa to configured webhooks.
+
+        Args:
+            detection: DetectionWithTaxa object containing audio file information
+        """
+        # Get audio file data safely
+        audio_file_data = detection.get_audio_file_data()
+        if not audio_file_data:
+            logger.info("===============================")
+            logger.info("WEBHOOK: No audio file to send for taxa detection")
+            logger.info("===============================")
+            return
+
+        if not self.config or not getattr(self.config, 'webhook_include_audio_data', False):
+            logger.info("===============================")
+            logger.info("WEBHOOK: Audio file sending disabled in config")
+            logger.info("===============================")
+            return
+
+        logger.info("===============================")
+        logger.info("WEBHOOK: Preparing audio file for taxa webhook")
+        logger.info("===============================")
+
+        try:
+            # For DetectionWithTaxa, we need to load the audio file from database
+            if not audio_file_data.get("file_path"):
+                logger.warning("===============================")
+                logger.warning("WEBHOOK: No file path available for taxa detection")
+                logger.warning("===============================")
+                return
+
+            audio_path = Path("/var/lib/birdnetpi/recordings/" + audio_file_data["file_path"])
+            if not audio_path.exists():
+                logger.warning("===============================")
+                logger.warning("WEBHOOK: Audio file does not exist: %s", audio_path)
+                logger.warning("===============================")
+                return
+
+            logger.info("WEBHOOK: Reading audio file: %s", audio_path)
+            with open(audio_path, 'rb') as f:
+                audio_data = f.read()
+            
+            logger.info("WEBHOOK: Audio file size: %d bytes", len(audio_data))
+            
+            # Encode audio data to base64
+            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+            logger.info("WEBHOOK: Audio file encoded to base64, size: %d characters", len(audio_base64))
+
+            # Get device identification information
+            device_info = self._get_device_info()
+
+            # Prepare audio file payload
+            audio_payload = {
+                "event_type": "audio_file",
+                "timestamp": datetime.now(UTC).isoformat(),
+                "device": device_info,
+                "detection_id": str(detection.id),
+                "audio_file": {
+                    **audio_file_data,
+                    "audio_data_base64": audio_base64,
+                },
+            }
+
+            logger.info("===============================")
+            logger.info("WEBHOOK: Sending audio file payload for taxa")
+            logger.info("WEBHOOK: Total payload size: %d bytes", len(str(audio_payload)))
+            logger.info("===============================")
+
+            await self._send_to_webhooks("audio_file", audio_payload)
+            
+            logger.info("===============================")
+            logger.info("WEBHOOK: Audio file webhook for taxa completed successfully")
+            logger.info("===============================")
+
+        except Exception as e:
+            logger.error("===============================")
+            logger.error("WEBHOOK: Failed to send audio file for taxa: %s", e)
+            logger.error("===============================")
 
     async def send_health_webhook(self, health_data: dict[str, Any]) -> None:
         """Send system health event to configured webhooks.
@@ -263,7 +539,12 @@ class WebhookService:
             event_type: Type of event being sent
             payload: Event payload to send
         """
+        logger.info("===============================")
+        logger.info("WEBHOOK: Sending %s event to webhooks", event_type)
+        logger.info("===============================")
+        
         if not self.client:
+            logger.warning("WEBHOOK: No HTTP client available")
             return
 
         # Filter webhooks that should receive this event type
@@ -272,12 +553,19 @@ class WebhookService:
         ]
 
         if not relevant_webhooks:
-            logger.debug("No webhooks configured for event type: %s", event_type)
+            logger.warning("===============================")
+            logger.warning("WEBHOOK: No webhooks configured for event type: %s", event_type)
+            logger.warning("===============================")
             return
+
+        logger.info("WEBHOOK: Found %d relevant webhooks for %s event", len(relevant_webhooks), event_type)
+        for webhook in relevant_webhooks:
+            logger.info("WEBHOOK: - %s (%s)", webhook.name, webhook.url)
 
         # Send to all relevant webhooks concurrently
         tasks = [self._send_webhook_request(webhook, payload) for webhook in relevant_webhooks]
 
+        logger.info("WEBHOOK: Sending requests concurrently...")
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Log results
@@ -287,13 +575,10 @@ class WebhookService:
         self.stats["total_sent"] += successful
         self.stats["total_failed"] += failed
 
-        logger.debug(
-            "Sent %s event to %d webhooks (%d successful, %d failed)",
-            event_type,
-            len(relevant_webhooks),
-            successful,
-            failed,
-        )
+        logger.info("===============================")
+        logger.info("WEBHOOK: %s event completed", event_type)
+        logger.info("WEBHOOK: %d successful, %d failed", successful, failed)
+        logger.info("===============================")
 
     async def _send_webhook_request(self, webhook: WebhookConfig, payload: dict[str, Any]) -> bool:
         """Send HTTP POST request to a single webhook.
@@ -306,7 +591,10 @@ class WebhookService:
             True if successful, False otherwise
         """
         if not self.client:
+            logger.error("WEBHOOK: No HTTP client available for %s", webhook.name)
             return False
+
+        logger.info("WEBHOOK: Sending to %s (%s)", webhook.name, webhook.url)
 
         for attempt in range(webhook.retry_count + 1):
             try:
@@ -316,6 +604,8 @@ class WebhookService:
                     "User-Agent": "BirdNET-Pi/1.0",
                     **webhook.headers,
                 }
+
+                logger.info("WEBHOOK: Attempt %d/%d for %s", attempt + 1, webhook.retry_count + 1, webhook.name)
 
                 # Send POST request
                 response = await self.client.post(
@@ -327,49 +617,37 @@ class WebhookService:
 
                 # Check if successful
                 if response.status_code < 400:
-                    logger.debug(
-                        "Webhook sent successfully: %s (HTTP %d)",
-                        webhook.name,
-                        response.status_code,
-                    )
+                    logger.info("===============================")
+                    logger.info("WEBHOOK: SUCCESS - %s (HTTP %d)", webhook.name, response.status_code)
+                    logger.info("===============================")
                     return True
                 else:
-                    logger.warning(
-                        "Webhook failed: %s (HTTP %d) - %s",
-                        webhook.name,
-                        response.status_code,
-                        response.text[:200],
-                    )
+                    logger.warning("===============================")
+                    logger.warning("WEBHOOK: FAILED - %s (HTTP %d) - %s", webhook.name, response.status_code, response.text[:200])
+                    logger.warning("===============================")
 
             except httpx.TimeoutException:
-                logger.warning(
-                    "Webhook timeout (attempt %d/%d): %s",
-                    attempt + 1,
-                    webhook.retry_count + 1,
-                    webhook.name,
-                )
+                logger.warning("===============================")
+                logger.warning("WEBHOOK: TIMEOUT (attempt %d/%d): %s", attempt + 1, webhook.retry_count + 1, webhook.name)
+                logger.warning("===============================")
             except httpx.RequestError as e:
-                logger.warning(
-                    "Webhook request error (attempt %d/%d): %s - %s",
-                    attempt + 1,
-                    webhook.retry_count + 1,
-                    webhook.name,
-                    str(e),
-                )
+                logger.warning("===============================")
+                logger.warning("WEBHOOK: REQUEST ERROR (attempt %d/%d): %s - %s", attempt + 1, webhook.retry_count + 1, webhook.name, str(e))
+                logger.warning("===============================")
             except Exception as e:
-                logger.error(
-                    "Unexpected webhook error (attempt %d/%d): %s - %s",
-                    attempt + 1,
-                    webhook.retry_count + 1,
-                    webhook.name,
-                    str(e),
-                )
+                logger.error("===============================")
+                logger.error("WEBHOOK: UNEXPECTED ERROR (attempt %d/%d): %s - %s", attempt + 1, webhook.retry_count + 1, webhook.name, str(e))
+                logger.error("===============================")
 
             # Wait before retry (exponential backoff)
             if attempt < webhook.retry_count:
-                await asyncio.sleep(2**attempt)
+                wait_time = 2**attempt
+                logger.info("WEBHOOK: Waiting %d seconds before retry...", wait_time)
+                await asyncio.sleep(wait_time)
 
-        logger.error("Webhook failed after %d attempts: %s", webhook.retry_count + 1, webhook.name)
+        logger.error("===============================")
+        logger.error("WEBHOOK: FINAL FAILURE after %d attempts: %s", webhook.retry_count + 1, webhook.name)
+        logger.error("===============================")
         return False
 
     def _get_device_info(self) -> dict[str, Any]:
@@ -416,6 +694,123 @@ class WebhookService:
                 pass  # Ignore config access errors
                 
         return device_info
+
+    async def _get_detection_with_taxa_data(self, detection_id: str) -> dict[str, Any] | None:
+        """Get DetectionWithTaxa data for a given detection ID.
+        
+        Args:
+            detection_id: UUID of the detection
+            
+        Returns:
+            Dictionary with DetectionWithTaxa data or None if not found
+        """
+        if not self.database_service or not self.species_db_service:
+            logger.debug("WEBHOOK: No database service or species service available for DetectionWithTaxa lookup")
+            return None
+            
+        try:
+            async with self.database_service.get_async_db() as session:
+                from sqlalchemy import text
+                
+                # First get the detection data
+                detection_query = text("""
+                    SELECT 
+                        d.id,
+                        d.scientific_name,
+                        d.common_name,
+                        d.confidence,
+                        d.timestamp,
+                        d.latitude,
+                        d.longitude,
+                        d.species_confidence_threshold,
+                        d.week,
+                        d.sensitivity_setting,
+                        d.overlap,
+                        CASE 
+                            WHEN d.timestamp = (
+                                SELECT MIN(timestamp) 
+                                FROM detections d2 
+                                WHERE d2.scientific_name = d.scientific_name
+                            ) THEN true 
+                            ELSE false 
+                        END as is_first_ever,
+                        CASE 
+                            WHEN d.timestamp = (
+                                SELECT MIN(timestamp) 
+                                FROM detections d2 
+                                WHERE d2.scientific_name = d.scientific_name 
+                                AND DATE(d2.timestamp) = DATE(d.timestamp)
+                            ) THEN true 
+                            ELSE false 
+                        END as is_first_in_period,
+                        (
+                            SELECT MIN(timestamp) 
+                            FROM detections d2 
+                            WHERE d2.scientific_name = d.scientific_name
+                        ) as first_ever_detection,
+                        (
+                            SELECT MIN(timestamp) 
+                            FROM detections d2 
+                            WHERE d2.scientific_name = d.scientific_name 
+                            AND DATE(d2.timestamp) = DATE(d.timestamp)
+                        ) as first_period_detection
+                    FROM detections d
+                    WHERE d.id = :detection_id
+                """)
+                
+                result = await session.execute(detection_query, {"detection_id": detection_id})
+                row = result.fetchone()
+                
+                if not row:
+                    logger.debug("WEBHOOK: No detection found for ID %s", detection_id)
+                    return None
+                
+                # Attach species databases to get taxonomy
+                await self.species_db_service.attach_all_to_session(session)
+                
+                try:
+                    # Get taxonomy data using the species service
+                    taxonomy_data = await self.species_db_service.get_species_taxonomy(
+                        session, row.scientific_name
+                    )
+                    
+                    # Extract genus from scientific name
+                    genus = row.scientific_name.split()[0] if row.scientific_name else ""
+                    
+                    return {
+                        "id": str(row.id),
+                        "scientific_name": row.scientific_name,
+                        "common_name": row.common_name,
+                        "confidence": row.confidence,
+                        "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+                        "latitude": row.latitude,
+                        "longitude": row.longitude,
+                        "species_confidence_threshold": row.species_confidence_threshold,
+                        "week": row.week,
+                        "sensitivity_setting": row.sensitivity_setting,
+                        "overlap": row.overlap,
+                        "taxonomy": {
+                            "ioc_english_name": row.common_name,  # Use common_name as IOC English name
+                            "translated_name": None,  # Could be populated with translation if needed
+                            "family": taxonomy_data.get("family") if taxonomy_data else None,
+                            "genus": genus,
+                            "order_name": taxonomy_data.get("order") if taxonomy_data else None,
+                        },
+                        "first_detection_info": {
+                            "is_first_ever": row.is_first_ever,
+                            "is_first_in_period": row.is_first_in_period,
+                            "first_ever_detection": row.first_ever_detection.isoformat() if row.first_ever_detection else None,
+                            "first_period_detection": row.first_period_detection.isoformat() if row.first_period_detection else None,
+                        },
+                    }
+                    
+                finally:
+                    # Always detach databases
+                    await self.species_db_service.detach_all_from_session(session)
+                    
+        except Exception as e:
+            logger.warning("WEBHOOK: Failed to get DetectionWithTaxa data: %s", e)
+            return None
 
     def _can_send(self) -> bool:
         """Check if webhooks can be sent."""

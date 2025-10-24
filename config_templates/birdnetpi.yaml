@@ -162,7 +162,8 @@ mqtt_client_id: birdnet-pi
 # Webhook Integration Settings
 enable_webhooks: true
 webhook_urls: ["https://n8n.nabaai.com/webhook/c7b55fc1-812d-4122-be6e-ebc0d73752cd"]  # List of webhook URLs, e.g., ["http://example.com/webhook", "http://another.com/hook"]
-webhook_events: detection,health,gps,system
+webhook_events: detection,health,gps,system,audio_file,detection_with_taxa
+webhook_include_audio_data: true  # Set to true to include base64 encoded audio files in webhooks (increases payload size significantly)
 
 # System Update Configuration
 # Controls how the system checks for and notifies about updates
