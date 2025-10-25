@@ -23,11 +23,12 @@ from birdnetpi.detections.models import (
     AudioFile,
     Detection,
     DetectionBase,
+    DetectionWithTaxa,
 )
 from birdnetpi.detections.queries import (
     DetectionQueryService,
 )
-from birdnetpi.notifications.signals import detection_signal
+from birdnetpi.notifications.signals import detection_signal, detection_with_taxa_signal
 from birdnetpi.species.display import SpeciesDisplayService
 from birdnetpi.system.file_manager import FileManager
 from birdnetpi.system.path_resolver import PathResolver
@@ -42,9 +43,10 @@ T = TypeVar("T")
 def emit_detection_event(func: Callable[..., Any]) -> Callable[..., Any]:
     """Emit detection events after successful data operations.
 
-    This decorator automatically emits a Blinker signal when a Detection
-    is successfully created or modified. It replaces the need for a separate
-    DetectionManager by handling event emission at the point of data modification.
+    This decorator automatically emits both detection and detection_with_taxa
+    Blinker signals when a Detection is successfully created or modified.
+    It replaces the need for a separate DetectionManager by handling event 
+    emission at the point of data modification.
 
     Args:
         func: A method that returns a Detection object
@@ -62,6 +64,15 @@ def emit_detection_event(func: Callable[..., Any]) -> Callable[..., Any]:
         if detection and isinstance(detection, Detection):
             logger.info(f"Emitting detection signal for {detection.id}")
             detection_signal.send(self, detection=detection)
+            
+            # Also emit detection_with_taxa_signal
+            # Create DetectionWithTaxa from the Detection
+            try:
+                detection_with_taxa = DetectionWithTaxa(detection=detection)
+                logger.info(f"Emitting detection_with_taxa signal for {detection.id}")
+                detection_with_taxa_signal.send(self, detection=detection_with_taxa)
+            except Exception as e:
+                logger.warning(f"Failed to emit detection_with_taxa signal: {e}")
 
         return detection
 

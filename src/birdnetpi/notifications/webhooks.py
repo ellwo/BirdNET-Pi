@@ -72,7 +72,7 @@ class WebhookConfig:
 class WebhookService:
     """Service for sending webhook notifications."""
 
-    def __init__(self, enable_webhooks: bool = False, config: Any = None, database_service: Any = None, species_db_service: Any = None) -> None:
+    def __init__(self, enable_webhooks: bool = False, config: Any = None, database_service: Any = None, species_db_service: Any = None, detection_query_service: Any = None) -> None:
         """Initialize webhook service.
 
         Args:
@@ -80,11 +80,13 @@ class WebhookService:
             config: BirdNET configuration object for accessing site_name and other settings
             database_service: Database service for querying DetectionWithTaxa data
             species_db_service: Species database service for taxonomy lookups
+            detection_query_service: Detection query service for enriched detection data
         """
         self.enable_webhooks = enable_webhooks
         self.config = config
         self.database_service = database_service
         self.species_db_service = species_db_service
+        self.detection_query_service = detection_query_service
         self.webhooks: list[WebhookConfig] = []
         self.client: httpx.AsyncClient | None = None
         self.stats = {
@@ -210,10 +212,10 @@ class WebhookService:
         }
 
         # Add audio file metadata (without base64 data)
-        audio_file_data = detection.get_audio_file_data()
-        if audio_file_data:
-            detection_data["audio_file"] = audio_file_data
-            logger.info("WEBHOOK: Audio file metadata included")
+        # audio_file_data = detection.get_audio_file_data()
+        # if audio_file_data:
+        #     detection_data["audio_file"] = audio_file_data
+        #     logger.info("WEBHOOK: Audio file metadata included")
 
         # Add DetectionWithTaxa data if available
         detection_with_taxa_data = await self._get_detection_with_taxa_data(str(detection.id))
@@ -379,6 +381,8 @@ class WebhookService:
 
             logger.info("===============================")
             logger.info("WEBHOOK: Sending audio file payload")
+            logger.info("WEBHOOK: Payload keys: %s", list(audio_payload.keys()))
+            logger.info("WEBHOOK: Detection ID: %s", audio_payload.get("detection_id"))
             logger.info("WEBHOOK: Total payload size: %d bytes", len(str(audio_payload)))
             logger.info("===============================")
 
@@ -459,6 +463,8 @@ class WebhookService:
 
             logger.info("===============================")
             logger.info("WEBHOOK: Sending audio file payload for taxa")
+            logger.info("WEBHOOK: Payload keys: %s", list(audio_payload.keys()))
+            logger.info("WEBHOOK: Detection ID: %s", audio_payload.get("detection_id"))
             logger.info("WEBHOOK: Total payload size: %d bytes", len(str(audio_payload)))
             logger.info("===============================")
 
@@ -687,9 +693,16 @@ class WebhookService:
         if self.config:
             try:
                 device_info["site_name"] = getattr(self.config, "site_name", "BirdNET-Pi")
-                device_info["latitude"] = getattr(self.config, "latitude", None)
-                device_info["longitude"] = getattr(self.config, "longitude", None)
-                device_info["birdweather_id"] = getattr(self.config, "birdweather_id", "")
+                latitude = getattr(self.config, "latitude", None)
+                longitude = getattr(self.config, "longitude", None)
+                birdweather_id = getattr(self.config, "birdweather_id", "")
+                
+                if latitude is not None:
+                    device_info["latitude"] = latitude
+                if longitude is not None:
+                    device_info["longitude"] = longitude
+                if birdweather_id:
+                    device_info["birdweather_id"] = birdweather_id
             except Exception:
                 pass  # Ignore config access errors
                 
@@ -704,109 +717,46 @@ class WebhookService:
         Returns:
             Dictionary with DetectionWithTaxa data or None if not found
         """
-        if not self.database_service or not self.species_db_service:
-            logger.debug("WEBHOOK: No database service or species service available for DetectionWithTaxa lookup")
+        if not self.detection_query_service:
+            logger.debug("WEBHOOK: No detection query service available for DetectionWithTaxa lookup")
             return None
             
         try:
-            async with self.database_service.get_async_db() as session:
-                from sqlalchemy import text
-                
-                # First get the detection data
-                detection_query = text("""
-                    SELECT 
-                        d.id,
-                        d.scientific_name,
-                        d.common_name,
-                        d.confidence,
-                        d.timestamp,
-                        d.latitude,
-                        d.longitude,
-                        d.species_confidence_threshold,
-                        d.week,
-                        d.sensitivity_setting,
-                        d.overlap,
-                        CASE 
-                            WHEN d.timestamp = (
-                                SELECT MIN(timestamp) 
-                                FROM detections d2 
-                                WHERE d2.scientific_name = d.scientific_name
-                            ) THEN true 
-                            ELSE false 
-                        END as is_first_ever,
-                        CASE 
-                            WHEN d.timestamp = (
-                                SELECT MIN(timestamp) 
-                                FROM detections d2 
-                                WHERE d2.scientific_name = d.scientific_name 
-                                AND DATE(d2.timestamp) = DATE(d.timestamp)
-                            ) THEN true 
-                            ELSE false 
-                        END as is_first_in_period,
-                        (
-                            SELECT MIN(timestamp) 
-                            FROM detections d2 
-                            WHERE d2.scientific_name = d.scientific_name
-                        ) as first_ever_detection,
-                        (
-                            SELECT MIN(timestamp) 
-                            FROM detections d2 
-                            WHERE d2.scientific_name = d.scientific_name 
-                            AND DATE(d2.timestamp) = DATE(d.timestamp)
-                        ) as first_period_detection
-                    FROM detections d
-                    WHERE d.id = :detection_id
-                """)
-                
-                result = await session.execute(detection_query, {"detection_id": detection_id})
-                row = result.fetchone()
-                
-                if not row:
-                    logger.debug("WEBHOOK: No detection found for ID %s", detection_id)
-                    return None
-                
-                # Attach species databases to get taxonomy
-                await self.species_db_service.attach_all_to_session(session)
-                
-                try:
-                    # Get taxonomy data using the species service
-                    taxonomy_data = await self.species_db_service.get_species_taxonomy(
-                        session, row.scientific_name
-                    )
-                    
-                    # Extract genus from scientific name
-                    genus = row.scientific_name.split()[0] if row.scientific_name else ""
-                    
-                    return {
-                        "id": str(row.id),
-                        "scientific_name": row.scientific_name,
-                        "common_name": row.common_name,
-                        "confidence": row.confidence,
-                        "timestamp": row.timestamp.isoformat() if row.timestamp else None,
-                        "latitude": row.latitude,
-                        "longitude": row.longitude,
-                        "species_confidence_threshold": row.species_confidence_threshold,
-                        "week": row.week,
-                        "sensitivity_setting": row.sensitivity_setting,
-                        "overlap": row.overlap,
-                        "taxonomy": {
-                            "ioc_english_name": row.common_name,  # Use common_name as IOC English name
-                            "translated_name": None,  # Could be populated with translation if needed
-                            "family": taxonomy_data.get("family") if taxonomy_data else None,
-                            "genus": genus,
-                            "order_name": taxonomy_data.get("order") if taxonomy_data else None,
-                        },
-                        "first_detection_info": {
-                            "is_first_ever": row.is_first_ever,
-                            "is_first_in_period": row.is_first_in_period,
-                            "first_ever_detection": row.first_ever_detection.isoformat() if row.first_ever_detection else None,
-                            "first_period_detection": row.first_period_detection.isoformat() if row.first_period_detection else None,
-                        },
-                    }
-                    
-                finally:
-                    # Always detach databases
-                    await self.species_db_service.detach_all_from_session(session)
+            # Use DetectionQueryService to get enriched detection data
+            from uuid import UUID
+            detection_with_taxa = await self.detection_query_service.get_detection_with_taxa(UUID(detection_id))
+            
+            if not detection_with_taxa:
+                logger.debug("WEBHOOK: No detection found for ID %s", detection_id)
+                return None
+            
+            # Convert DetectionWithTaxa to dictionary format
+            return {
+                "id": str(detection_with_taxa.id),
+                "scientific_name": detection_with_taxa.scientific_name,
+                "common_name": detection_with_taxa.common_name,
+                "confidence": detection_with_taxa.confidence,
+                "timestamp": detection_with_taxa.timestamp.isoformat() if detection_with_taxa.timestamp else None,
+                "latitude": detection_with_taxa.latitude,
+                "longitude": detection_with_taxa.longitude,
+                "species_confidence_threshold": detection_with_taxa.species_confidence_threshold,
+                "week": detection_with_taxa.week,
+                "sensitivity_setting": detection_with_taxa.sensitivity_setting,
+                "overlap": detection_with_taxa.overlap,
+                "taxonomy": {
+                    "ioc_english_name": detection_with_taxa.ioc_english_name,
+                    "translated_name": detection_with_taxa.translated_name,
+                    "family": detection_with_taxa.family,
+                    "genus": detection_with_taxa.genus,
+                    "order_name": detection_with_taxa.order_name,
+                },
+                "first_detection_info": {
+                    "is_first_ever": detection_with_taxa.is_first_ever,
+                    "is_first_in_period": detection_with_taxa.is_first_in_period,
+                    "first_ever_detection": detection_with_taxa.first_ever_detection.isoformat() if detection_with_taxa.first_ever_detection else None,
+                    "first_period_detection": detection_with_taxa.first_period_detection.isoformat() if detection_with_taxa.first_period_detection else None,
+                },
+            }
                     
         except Exception as e:
             logger.warning("WEBHOOK: Failed to get DetectionWithTaxa data: %s", e)

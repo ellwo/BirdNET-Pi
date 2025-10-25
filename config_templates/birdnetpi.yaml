@@ -49,7 +49,7 @@ webhook_targets:
   # Examples:
   # home_assistant: "http://192.168.1.100:8123/api/webhook/birdnet"
   # ifttt: "https://maker.ifttt.com/trigger/bird_detected/with/key/YOUR_KEY"
-  n8n: "https://n8n.nabaai.com/webhook/c7b55fc1-812d-4122-be6e-ebc0d73752cd"
+  orgnize: "http://172.20.10.7:8001/webhooks/birdnet"
 
 # Default message templates (Jinja2 supported)
 # Available variables: {{ common_name }}, {{ scientific_name }}, {{ confidence }},
@@ -62,7 +62,7 @@ notification_rules:
   - name: "Immediate Webhook All New Detections"
     enabled: true
     service: "webhook"
-    target: "n8n"
+    target: "orgnize"
     frequency:
       when: "immediate"
     scope: "new_ever"
@@ -161,7 +161,7 @@ mqtt_client_id: birdnet-pi
 
 # Webhook Integration Settings
 enable_webhooks: true
-webhook_urls: ["https://n8n.nabaai.com/webhook/c7b55fc1-812d-4122-be6e-ebc0d73752cd"]  # List of webhook URLs, e.g., ["http://example.com/webhook", "http://another.com/hook"]
+webhook_urls: ["http://172.20.10.7:8001/webhooks/birdnet"]  # List of webhook URLs, e.g., ["http://example.com/webhook", "http://another.com/hook"]
 webhook_events: detection,health,gps,system,audio_file,detection_with_taxa
 webhook_include_audio_data: true  # Set to true to include base64 encoded audio files in webhooks (increases payload size significantly)
 

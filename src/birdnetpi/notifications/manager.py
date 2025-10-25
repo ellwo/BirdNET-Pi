@@ -109,9 +109,9 @@ class NotificationManager:
             loop = asyncio.get_running_loop()
             task = loop.create_task(self.send_detection_with_taxa_webhook(detection))
             # Store task reference to avoid potential garbage collection issues
-            self._taxa_tasks: set = getattr(self, "_taxa_tasks", set())
-            self._taxa_tasks.add(task)
-            task.add_done_callback(self._taxa_tasks.discard)
+            self._background_tasks_taxa: set = getattr(self, "_background_tasks_taxa", set())
+            self._background_tasks_taxa.add(task)
+            task.add_done_callback(self._background_tasks_taxa.discard)
         except RuntimeError:
             logger.debug("No event loop running, skipping DetectionWithTaxa webhook notifications")
 

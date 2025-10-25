@@ -102,3 +102,5 @@ If audio issues occur:
 ✅ **Web Interface**: Accessible at `http://localhost:8000`
 
 Your BirdNET-Pi is now fully automated and will work correctly every time you restart the container! 🎉🐦
+
+

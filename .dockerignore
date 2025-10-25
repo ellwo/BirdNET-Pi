@@ -35,3 +35,4 @@ Thumbs.db
 .gitattributes
 dump.rdb
 *.rdb
+birdnet-webhook-handler

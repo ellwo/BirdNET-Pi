@@ -182,6 +182,7 @@ class Container(containers.DeclarativeContainer):
         config=config,
         database_service=core_database,
         species_db_service=species_database,
+        detection_query_service=detection_query_service,
     )
 
     apprise_service = providers.Singleton(
